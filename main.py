@@ -21,26 +21,26 @@ def authenticate(request) -> Tuple[bool, Optional[Tuple[str, int]]]:
 
     # 1. Check for server-side configuration issues.
     if not expected_token:
-        print("CRITICAL: AUTH_TOKEN environment variable not set.")
-        error = ("Internal Server Error: Server is not configured for authentication.", 500)
+        print("CRITICAL: AUTH_TOKEN environment variable not set.\n")
+        error = ("Internal Server Error: Server is not configured for authentication. \n", 500)
         return False, error
 
     # 2. Check for the presence and format of the Authorization header.
     auth_header = request.headers.get('Authorization')
     if not auth_header or not auth_header.startswith('Bearer '):
-        error = ("Unauthorized: Missing or invalid Authorization header.", 401)
+        error = ("Unauthorized: Missing or invalid Authorization header.\n", 401)
         return False, error
 
     # 3. Extract the token from the header.
     try:
         provided_token = auth_header.split('Bearer ')[1]
     except IndexError:
-        error = ("Unauthorized: Malformed Authorization header.", 401)
+        error = ("Unauthorized: Malformed Authorization header.\n", 401)
         return False, error
 
     # 4. Securely compare the provided token against the expected one.
     if not hmac.compare_digest(provided_token, expected_token):
-        error = ("Forbidden: Invalid token.", 403)
+        error = ("Forbidden: Invalid token.\n", 403)
         return False, error
 
     # If all checks pass, authentication is successful.
