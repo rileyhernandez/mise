@@ -10,9 +10,10 @@ steps:
           --trigger-http \
           --entry-point=mise \
           --source=.
-          --no-allow-unauthenticated \
-          --set-secrets=AUTH_TOKEN=mise-auth:latest
+          --set-secrets=AUTH_TOKEN=mise-auth:latest \
           --set-env-vars=PROJECT_ID=${PROJECT_ID}
+        
+        
 
 timeout: 540s
 
