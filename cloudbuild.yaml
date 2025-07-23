@@ -1,18 +1,27 @@
 steps:
   - name: 'gcr.io/cloud-builders/gcloud'
-    entrypoint: bash
+    entrypoint: "gcloud"
     args:
-      - '-c'
-      - |
-        gcloud functions deploy mise \
-          --region=us-west1 \
-          --runtime=python313 \
-          --trigger-http \
-          --entry-point=mise \
-          --source=.
-          --set-secrets=AUTH_TOKEN=mise-auth:latest \
-          --set-env-vars=PROJECT_ID=${PROJECT_ID}
-        
+      - "functions"
+      - "deploy"
+      - "mise"
+      - "--source=."
+      - "--region=us-west1"
+      - "--runtime=python313"
+      - "--trigger-http"
+      - "--entry-point=mise"
+      - "--set-secrets=AUTH_TOKEN=boh-auth-token:latest"
+      - "--set-env-vars=PROJECT_ID=${PROJECT_ID}"
+#    args:
+#        gcloud functions deploy mise \
+#          --region=us-west1 \
+#          --runtime=python313 \
+#          --trigger-http \
+#          --entry-point=mise \
+#          --source=.
+#          --set-secrets=AUTH_TOKEN=mise-auth:latest \
+#          --set-env-vars=PROJECT_ID=${PROJECT_ID}
+
         
 
 timeout: 540s
