@@ -48,20 +48,6 @@ def authenticate(request) -> Tuple[bool, Optional[Tuple[str, int]]]:
 
 
 def mise(request):
-    """
-    A cloud function that requires authentication.
-
-    It calls a helper function to perform the auth check before
-    proceeding with its main logic.
-
-    Args:
-        request (flask.Request): The request object.
-            <http://flask.pocoo.org/docs/1.0/api/#flask.Request>
-
-    Returns:
-        The response text or a tuple of the response text and an HTTP
-        status code.
-    """
     # Call the authentication function first.
     is_authenticated, error_response = authenticate(request)
 
