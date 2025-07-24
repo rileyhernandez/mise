@@ -7,6 +7,8 @@ import flask
 import functions_framework
 from google.cloud import firestore
 from get import get
+from put import put
+
 
 def authenticate(request: flask.Request) -> Tuple[bool, Optional[Tuple[str, int]]]:
     """
@@ -64,13 +66,11 @@ def mise(request: flask.Request) -> string:
     db = firestore.Client(project="back-of-house-backend", database="caldo-backend") # type: ignore
 
     if request.method == 'GET':
-        response = get(request, db)
-        return response
+        return get(request, db)
     elif request.method == 'POST':
         # TODO
         pass
     elif request.method == 'PUT':
-        # TODO
-        pass
+        return put(request, db)
 
     return "Hello, Chef!"
