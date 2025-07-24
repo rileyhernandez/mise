@@ -1,0 +1,6 @@
+[tool.mypy]
+
+# Ignore missing type hints for all google cloud libraries
+[[tool.mypy.overrides]]
+module = "google.cloud.*"
+ignore_missing_imports = true
