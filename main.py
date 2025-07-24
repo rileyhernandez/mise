@@ -1,8 +1,14 @@
 import os
 import hmac
+import string
 from typing import Tuple, Optional
 
-def authenticate(request) -> Tuple[bool, Optional[Tuple[str, int]]]:
+import flask
+import functions_framework
+from google.cloud import firestore
+from get import get
+
+def authenticate(request: flask.Request) -> Tuple[bool, Optional[Tuple[str, int]]]:
     """
     Checks for a valid Bearer token in the request header.
 
@@ -46,8 +52,8 @@ def authenticate(request) -> Tuple[bool, Optional[Tuple[str, int]]]:
     # If all checks pass, authentication is successful.
     return True, None
 
-
-def mise(request):
+@functions_framework.http
+def mise(request: flask.Request) -> string:
     # Call the authentication function first.
     is_authenticated, error_response = authenticate(request)
 
@@ -55,6 +61,16 @@ def mise(request):
     if not is_authenticated:
         return error_response
 
-    # --- Authentication successful ---
-    # You can now proceed with the core logic of your function.
+    db = firestore.Client(project="back-of-house-backend", database="caldo-backend") # type: ignore
+
+    if request.method == 'GET':
+        response = get(request, db)
+        return response
+    elif request.method == 'POST':
+        # TODO
+        pass
+    elif request.method == 'PUT':
+        # TODO
+        pass
+
     return "Hello, Chef!"
