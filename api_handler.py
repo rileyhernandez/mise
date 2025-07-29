@@ -9,9 +9,11 @@ from menu import (
     FirestoreError,
     Model,
     DEVICE_COLLECTION,
-    FirestoreDeviceDocument, Device,
+    FirestoreDeviceDocument,
+    Device,
 )
 from google.cloud import firestore
+
 
 @firestore.transactional
 def _get_transaction(transaction, db: firestore.Client, device: Device) -> Config:
@@ -42,6 +44,7 @@ def _get_transaction(transaction, db: firestore.Client, device: Device) -> Confi
 
     return Config.model_validate(config_snapshot.to_dict())
 
+
 def get(request: flask.Request, db: firestore.Client) -> flask.Response:
     """
     Handles GET requests to fetch device configuration.
@@ -51,7 +54,8 @@ def get(request: flask.Request, db: firestore.Client) -> flask.Response:
         transaction = db.transaction()
         config = _get_transaction(transaction, db, device)
         print("CONFIG: ", config)
-        response = flask.jsonify(config.model_dump(by_alias=False))
+        # Use the new custom serializer for the client response
+        response = flask.jsonify(config.to_client_dict())
         response.status_code = HTTPStatus.OK
         return response
     except (ValueError, DeserializationError) as e:
@@ -68,8 +72,11 @@ def get(request: flask.Request, db: firestore.Client) -> flask.Response:
         response.status_code = HTTPStatus.INTERNAL_SERVER_ERROR
         return response
 
+
 @firestore.transactional
-def _put_transaction(transaction, db: firestore.Client, device: Device, new_config: Config):
+def _put_transaction(
+    transaction, db: firestore.Client, device: Device, new_config: Config
+):
     device_query = (
         db.collection(DEVICE_COLLECTION)
         .where(filter=firestore.FieldFilter("model", "==", device.model.value))
@@ -94,6 +101,7 @@ def _put_transaction(transaction, db: firestore.Client, device: Device, new_conf
 
     # Use transaction.set() for writes
     transaction.set(config_doc_ref, new_config.model_dump(by_alias=True))
+
 
 def put(request: flask.Request, db: firestore.Client) -> flask.Response:
     """
@@ -128,8 +136,11 @@ def put(request: flask.Request, db: firestore.Client) -> flask.Response:
         response.status_code = HTTPStatus.INTERNAL_SERVER_ERROR
         return response
 
+
 @firestore.transactional
-def _post_transaction(transaction, db: firestore.Client, model: Model, new_config: Config) -> Device:
+def _post_transaction(
+    transaction, db: firestore.Client, model: Model, new_config: Config
+) -> Device:
     """
     Creates a new config and a new device document within a transaction,
     preventing race conditions.
@@ -163,6 +174,7 @@ def _post_transaction(transaction, db: firestore.Client, model: Model, new_confi
 
     return new_device_doc.to_device()
 
+
 def post(request: flask.Request, db: firestore.Client) -> flask.Response:
     try:
         model_str = request.path.split("/")[-1]
@@ -170,9 +182,7 @@ def post(request: flask.Request, db: firestore.Client) -> flask.Response:
         new_config_data = request.get_json()
 
         transaction = db.transaction()
-        new_device = _post_transaction(
-            transaction, db, model, new_config_data
-        )
+        new_device = _post_transaction(transaction, db, model, new_config_data)
 
         return flask.make_response(new_device.model_dump(), HTTPStatus.CREATED)
     except (ValidationError, DeserializationError) as e:

@@ -71,3 +71,24 @@ def mise(request: flask.Request) -> flask.Response:
         return put(request, db)
 
     return flask.make_response("Hello, Chef!")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
