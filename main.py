@@ -4,6 +4,8 @@ from typing import Tuple, Optional
 import flask
 import functions_framework
 from google.cloud import firestore
+
+from address_api_handler import get_address, put_address
 from api_handler import get, put, post
 
 
@@ -63,32 +65,17 @@ def mise(request: flask.Request) -> flask.Response:
 
     db = firestore.Client(project="back-of-house-backend", database="caldo-backend")  # type: ignore
 
-    if request.method == "GET":
-        return get(request, db)
-    elif request.method == "POST":
-        return post(request, db)
-    elif request.method == "PUT":
-        return put(request, db)
+    if request.path.split("/")[1] == "address":
+        if request.method == "GET":
+            return get_address(request, db)
+        elif request.method == "PUT":
+            return put_address(request, db)
+    else:
+        if request.method == "GET":
+            return get(request, db)
+        elif request.method == "POST":
+            return post(request, db)
+        elif request.method == "PUT":
+            return put(request, db)
 
     return flask.make_response("Hello, Chef!")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
