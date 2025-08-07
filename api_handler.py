@@ -1,5 +1,7 @@
 import flask
 from http import HTTPStatus
+
+from mypy.typeops import false_only
 from pydantic import ValidationError
 from menu import (
     CONFIG_COLLECTION,
@@ -20,17 +22,17 @@ def _get_transaction(transaction, db: firestore.Client, device: Device) -> Confi
     device_query = (
         db.collection(DEVICE_COLLECTION)
         .where(filter=firestore.FieldFilter("model", "==", device.model.value))
-        .where(filter=firestore.FieldFilter("number", "==", device.number))
+        .where(filter=firestore.FieldFilter("serialNumber", "==", device.serial_number))
     )
     docs_stream = device_query.stream(transaction=transaction)
     documents = list(docs_stream)
     if len(documents) > 1:
         raise FirestoreError(
-            f"Multiple devices with this serial number exist: {device.model.value}-{device.number}"
+            f"Multiple devices with this serial number exist: {device.model.value}-{device.serial_number}"
         )
     if not documents:
         raise FirestoreError(
-            f"No document found with serial number {device.model.value}-{device.number} in collection '{DEVICE_COLLECTION}'."
+            f"No document found with serial number {device.model.value}-{device.serial_number} in collection '{DEVICE_COLLECTION}'."
         )
 
     device_document = FirestoreDeviceDocument.model_validate(documents[0].to_dict())
@@ -80,18 +82,18 @@ def _put_transaction(
     device_query = (
         db.collection(DEVICE_COLLECTION)
         .where(filter=firestore.FieldFilter("model", "==", device.model.value))
-        .where(filter=firestore.FieldFilter("number", "==", device.number))
+        .where(filter=firestore.FieldFilter("serialNumber", "==", device.serial_number))
     )
     docs_stream = device_query.stream(transaction=transaction)
     documents = list(docs_stream)
 
     if len(documents) > 1:
         raise FirestoreError(
-            f"Multiple devices with this serial number exist: {device.model.value}-{device.number}"
+            f"Multiple devices with this serial number exist: {device.model.value}-{device.serial_number}"
         )
     if not documents:
         raise FirestoreError(
-            f"No document found with serial number {device.model.value}-{device.number} in collection '{DEVICE_COLLECTION}'."
+            f"No document found with serial number {device.model.value}-{device.serial_number} in collection '{DEVICE_COLLECTION}'."
         )
 
     device_document = FirestoreDeviceDocument.model_validate(documents[0].to_dict())
@@ -116,7 +118,7 @@ def put(request: flask.Request, db: firestore.Client) -> flask.Response:
 
         response = flask.jsonify(
             {
-                "message": f"Config for {device.model.value}-{device.number} updated successfully."
+                "message": f"Config for {device.model.value}-{device.serial_number} updated successfully."
             }
         )
         response.status_code = HTTPStatus.OK
@@ -145,20 +147,36 @@ def _post_transaction(
     Creates a new config and a new device document within a transaction,
     preventing race conditions.
     """
-    # 1. Find the most recent device number to determine the next number
+    serial_number = f"{new_config.phidget_id}-{new_config.load_cell_id}"
+
     most_recent_device_query = (
         db.collection(DEVICE_COLLECTION)
-        .where(filter=firestore.FieldFilter("model", "==", model.value))
-        .order_by("number", direction=firestore.Query.DESCENDING)
-        .limit(1)
+        .where(filter=firestore.FieldFilter("serialNumber", "==", serial_number))
     )
     most_recent_device_stream = most_recent_device_query.stream(transaction=transaction)
     most_recent_device = list(most_recent_device_stream)
 
-    # If no devices of this model exist, start at 1. Otherwise, increment.
-    new_device_number = (
-        most_recent_device[0].get("number") + 1 if most_recent_device else 1
-    )
+    if len(most_recent_device) > 0:
+        serial_number_is_set = False
+    else:
+        serial_number_is_set = True
+    index = 0
+    while not serial_number_is_set:
+        new_serial_number = f"{serial_number}-{index}"
+        most_recent_device_query = db.collection(DEVICE_COLLECTION).where(
+            filter=firestore.FieldFilter("serialNumber", "==", new_serial_number)
+        )
+        most_recent_device_stream = most_recent_device_query.stream(
+            transaction=transaction
+        )
+        most_recent_device = list(most_recent_device_stream)
+        if len(most_recent_device) > 0:
+            index += 1
+        else:
+            serial_number_is_set = True
+            serial_number = new_serial_number
+
+
 
     # 2. Create new config document
     new_config = Config.model_validate(new_config)
@@ -167,10 +185,10 @@ def _post_transaction(
 
     # 3. Create new device document
     new_device_doc = FirestoreDeviceDocument.model_construct(
-        model=model, number=new_device_number, config=new_config_doc_ref.id
+        model=model, serial_number=serial_number, config=new_config_doc_ref.id
     )
     new_device_doc_ref = db.collection(DEVICE_COLLECTION).document()
-    transaction.set(new_device_doc_ref, new_device_doc.model_dump())
+    transaction.set(new_device_doc_ref, new_device_doc.model_dump(by_alias=True))
 
     return new_device_doc.to_device()
 
@@ -179,7 +197,7 @@ def post(request: flask.Request, db: firestore.Client) -> flask.Response:
     try:
         model_str = request.path.split("/")[-1]
         model = Model[model_str]
-        new_config_data = request.get_json()
+        new_config_data = Config.model_validate(request.get_json())
 
         transaction = db.transaction()
         new_device = _post_transaction(transaction, db, model, new_config_data)

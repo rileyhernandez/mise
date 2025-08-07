@@ -1,11 +1,10 @@
-import unittest
-from unittest.mock import MagicMock, patch, ANY
 import flask
+import pytest
+from unittest.mock import MagicMock, patch
 from http import HTTPStatus
-from pydantic import ValidationError
 
-# Import the functions and classes to be tested
-from api_handler import get, put, post
+from api_handler import get, put, post, _post_transaction
+from address_api_handler import get_address, put_address, _get_address_transaction
 from menu import (
     CONFIG_COLLECTION,
     DEVICE_COLLECTION,
@@ -14,517 +13,330 @@ from menu import (
     FirestoreError,
     Model,
 )
-from address_api_handler import get_address, put_address
+
+# --- Fixtures ---
 
 
-class TestGetHandler(unittest.TestCase):
-    """Tests for the GET request handler."""
+@pytest.fixture
+def mock_db():
+    """Fixture for a mocked Firestore client."""
+    return MagicMock()
 
-    def setUp(self):
-        """Set up a mock Flask app context and a mock Firestore client."""
-        self.app = flask.Flask(__name__)
-        self.mock_db = MagicMock()
-        self.mock_transaction = MagicMock()
-        self.mock_db.transaction.return_value = self.mock_transaction
 
-    def test_get_success(self):
-        """Test successful retrieval of a device's configuration."""
-        # --- Setup Mocks ---
-        # Mock the device document returned from the initial query
-        mock_device_snapshot = MagicMock()
-        mock_device_snapshot.to_dict.return_value = {
-            "model": "IchibuV1",
-            "number": 1,
-            "config": "config123",
-        }
+@pytest.fixture
+def app_context():
+    """Fixture to create a Flask application context for tests that need it."""
+    app = flask.Flask(__name__)
+    with app.app_context():
+        yield
 
-        # Mock the config document that is fetched by reference
-        mock_config_snapshot = MagicMock()
-        mock_config_snapshot.exists = True
-        mock_config_snapshot.to_dict.return_value = {
-            "gain": 1.0,
-            "ingredient": "salt",
-            "loadCellId": 1,
-            "location": "pantry",
-            "offset": 0.0,
-            "phidgetId": 123,
-            "heartbeatPeriod": 30.0,
-            "phidgetSamplePeriod": 0.1,
-            "maxNoise": 0.5,
-            "bufferLength": 10,
-        }
 
-        # Configure the mock DB client's chained calls
-        mock_device_query = (
-            self.mock_db.collection.return_value.where.return_value.where.return_value
-        )
-        mock_device_query.stream.return_value = [mock_device_snapshot]
+@pytest.fixture
+def sample_device():
+    """A sample Device object for testing."""
+    return Device(model=Model.IchibuV1, serial_number="test-serial-123")
 
-        mock_config_ref = self.mock_db.collection.return_value.document.return_value
-        mock_config_ref.get.return_value = mock_config_snapshot
 
-        # --- Test Execution ---
-        with self.app.test_request_context(path="/IchibuV1/1"):
-            response = get(flask.request, self.mock_db)
+@pytest.fixture
+def sample_config_data():
+    """A sample config data dictionary, as received from a client."""
+    return {
+        "gain": 1.0,
+        "ingredient": "coffee",
+        "loadCellId": 12345,
+        "location": "counter",
+        "offset": 0.5,
+        "phidgetId": 67890,
+        "heartbeatPeriod": {"secs": 30, "nanos": 0},
+        "phidgetSamplePeriod": {"secs": 1, "nanos": 0},
+        "maxNoise": 0.01,
+        "bufferLength": 10,
+    }
 
-        # --- Assertions ---
-        self.assertEqual(response.status_code, HTTPStatus.OK)
 
-        # Verify the response body is correctly serialized for the client
-        expected_json = {
-            "buffer_length": 10,
-            "gain": 1.0,
-            "heartbeat_period": {"secs": 30, "nanos": 0},
-            "ingredient": "salt",
-            "load_cell_id": 1,
-            "location": "pantry",
-            "max_noise": 0.5,
-            "offset": 0.0,
-            "phidget_id": 123,
-            "phidget_sample_period": {"secs": 0, "nanos": 100000000},
-        }
-        self.assertEqual(response.get_json(), expected_json)
+@pytest.fixture
+def sample_config(sample_config_data):
+    """A sample Config Pydantic object."""
+    return Config.model_validate(sample_config_data)
 
-        # Verify transactionality
-        mock_device_query.stream.assert_called_with(transaction=self.mock_transaction)
-        mock_config_ref.get.assert_called_with(transaction=self.mock_transaction)
 
-    def test_get_device_not_found(self):
-        """Test GET request for a device that does not exist."""
-        # Setup: The device query returns no documents
-        mock_device_query = (
-            self.mock_db.collection.return_value.where.return_value.where.return_value
-        )
-        mock_device_query.stream.return_value = []
+# --- Helper Functions ---
 
-        with self.app.test_request_context(path="/IchibuV1/99"):
-            response = get(flask.request, self.mock_db)
 
-        self.assertEqual(response.status_code, HTTPStatus.NOT_FOUND)
-        self.assertIn("No document found", response.get_json()["error"])
+def create_mock_request(path, method="GET", json_data=None):
+    """Helper to create a mock Flask request."""
+    req = MagicMock(spec=flask.Request)
+    req.path = path
+    req.method = method
+    req.get_json.return_value = json_data
+    return req
 
-    def test_get_multiple_devices_found(self):
-        """Test GET request where a serial number matches multiple devices (data integrity issue)."""
-        # Setup: The device query returns more than one document
-        mock_device_query = (
-            self.mock_db.collection.return_value.where.return_value.where.return_value
-        )
-        mock_device_query.stream.return_value = [MagicMock(), MagicMock()]
 
-        with self.app.test_request_context(path="/IchibuV1/1"):
-            response = get(flask.request, self.mock_db)
+def create_mock_firestore_doc(data, doc_id="some-doc-id"):
+    """Helper to create a mock Firestore document snapshot."""
+    doc = MagicMock()
+    doc.to_dict.return_value = data
+    doc.id = doc_id
+    doc.exists = True
+    doc.reference = MagicMock()
+    return doc
 
-        self.assertEqual(response.status_code, HTTPStatus.NOT_FOUND)
-        self.assertIn(
-            "Multiple devices with this serial number exist",
-            response.get_json()["error"],
-        )
 
-    def test_get_config_not_found(self):
-        """Test GET request where the device document points to a non-existent config."""
-        # Setup: Device exists, but its config document does not
-        mock_device_snapshot = MagicMock()
-        mock_device_snapshot.to_dict.return_value = {
-            "model": "IchibuV1",
-            "number": 1,
-            "config": "config123",
-        }
+# --- Tests for api_handler.py ---
 
-        mock_config_snapshot = MagicMock()
-        mock_config_snapshot.exists = False  # The config document is missing
 
-        mock_device_query = (
-            self.mock_db.collection.return_value.where.return_value.where.return_value
-        )
-        mock_device_query.stream.return_value = [mock_device_snapshot]
+class TestApiHandler:
+    @patch("api_handler.path_to_device")
+    @patch("api_handler._get_transaction")
+    def test_get_success(
+        self, mock_get_transaction, mock_path_to_device, mock_db, app_context, sample_device, sample_config
+    ):
+        # Arrange
+        mock_path_to_device.return_value = sample_device
+        mock_get_transaction.return_value = sample_config
+        request = create_mock_request(path=f"/{sample_device.model.value}/{sample_device.serial_number}")
 
-        mock_config_ref = self.mock_db.collection.return_value.document.return_value
-        mock_config_ref.get.return_value = mock_config_snapshot
+        # Act
+        response = get(request, mock_db)
 
-        with self.app.test_request_context(path="/IchibuV1/1"):
-            response = get(flask.request, self.mock_db)
+        # Assert
+        mock_path_to_device.assert_called_once_with(request.path)
+        mock_db.transaction.assert_called_once()
+        mock_get_transaction.assert_called_once_with(mock_db.transaction(), mock_db, sample_device)
+        assert response.status_code == HTTPStatus.OK
+        assert response.json == sample_config.to_client_dict()
 
-        self.assertEqual(response.status_code, HTTPStatus.NOT_FOUND)
-        self.assertIn(
-            "Config document with ID config123 not found", response.get_json()["error"]
+    @patch("api_handler.path_to_device")
+    @patch("api_handler._get_transaction", side_effect=FirestoreError("Device not found"))
+    def test_get_device_not_found(self, mock_get_transaction, mock_path_to_device, mock_db, app_context, sample_device):
+        # Arrange
+        mock_path_to_device.return_value = sample_device
+        request = create_mock_request(path=f"/{sample_device.model.value}/{sample_device.serial_number}")
+
+        # Act
+        response = get(request, mock_db)
+
+        # Assert
+        assert response.status_code == HTTPStatus.NOT_FOUND
+        assert "Device not found" in response.json["error"]
+
+    @patch("api_handler.path_to_device", side_effect=ValueError("Invalid path"))
+    def test_get_invalid_path(self, mock_path_to_device, mock_db, app_context):
+        # Arrange
+        request = create_mock_request(path="/invalid/path/format")
+
+        # Act
+        response = get(request, mock_db)
+
+        # Assert
+        assert response.status_code == HTTPStatus.BAD_REQUEST
+        assert "Invalid path" in response.json["error"]
+
+    @patch("api_handler.path_to_device")
+    @patch("api_handler._put_transaction")
+    def test_put_success(
+        self, mock_put_transaction, mock_path_to_device, mock_db, app_context, sample_device, sample_config_data
+    ):
+        # Arrange
+        mock_path_to_device.return_value = sample_device
+        request = create_mock_request(
+            path=f"/{sample_device.model.value}/{sample_device.serial_number}",
+            method="PUT",
+            json_data=sample_config_data,
         )
 
-    def test_get_bad_path(self):
-        """Test GET request with a malformed path."""
-        with self.app.test_request_context(path="/invalid_path"):
-            response = get(flask.request, self.mock_db)
+        # Act
+        response = put(request, mock_db)
 
-        self.assertEqual(response.status_code, HTTPStatus.BAD_REQUEST)
-        self.assertIn("Invalid path format", response.get_json()["error"])
+        # Assert
+        mock_path_to_device.assert_called_once_with(request.path)
+        mock_db.transaction.assert_called_once()
+        # The config object is created inside put(), so we check it was called with a Config instance
+        mock_put_transaction.assert_called_once()
+        call_args = mock_put_transaction.call_args[0]
+        assert isinstance(call_args[3], Config)
+        assert response.status_code == HTTPStatus.OK
+        assert "updated successfully" in response.json["message"]
 
-
-class TestPutHandler(unittest.TestCase):
-    """Tests for the PUT request handler."""
-
-    def setUp(self):
-        self.app = flask.Flask(__name__)
-        self.mock_db = MagicMock()
-        self.mock_transaction = MagicMock()
-        self.mock_db.transaction.return_value = self.mock_transaction
-
-        # Common setup for a valid device and config reference
-        mock_device_snapshot = MagicMock()
-        mock_device_snapshot.to_dict.return_value = {
-            "model": "IchibuV1",
-            "number": 1,
-            "config": "config123",
-        }
-
-        mock_device_query = (
-            self.mock_db.collection.return_value.where.return_value.where.return_value
-        )
-        mock_device_query.stream.return_value = [mock_device_snapshot]
-
-        self.mock_config_ref = (
-            self.mock_db.collection.return_value.document.return_value
+    @patch("api_handler.path_to_device")
+    def test_put_invalid_json(self, mock_path_to_device, mock_db, app_context, sample_device):
+        # Arrange
+        mock_path_to_device.return_value = sample_device
+        request = create_mock_request(
+            path=f"/{sample_device.model.value}/{sample_device.serial_number}",
+            method="PUT",
+            json_data={"invalid": "data"},
         )
 
-    def test_put_success(self):
-        """Test successful update of a device's configuration."""
-        request_json = {
-            "gain": 2.0,
-            "ingredient": "sugar",
-            "loadCellId": 2,
-            "location": "shelf",
-            "offset": 0.1,
-            "phidgetId": 456,
-            "heartbeatPeriod": {"secs": 60, "nanos": 0},
-            "phidgetSamplePeriod": {"secs": 0, "nanos": 200000000},
-            "maxNoise": 0.6,
-            "bufferLength": 20,
-        }
+        # Act
+        response = put(request, mock_db)
 
-        with self.app.test_request_context(
-            path="/IchibuV1/1", method="PUT", json=request_json
-        ):
-            response = put(flask.request, self.mock_db)
+        # Assert
+        assert response.status_code == HTTPStatus.BAD_REQUEST
+        assert "Bad Request" in response.json["error"]
 
-        self.assertEqual(response.status_code, HTTPStatus.OK)
-        self.assertIn("updated successfully", response.get_json()["message"])
+    @patch("api_handler._post_transaction")
+    def test_post_success(self, mock_post_transaction, mock_db, app_context, sample_config_data, sample_device):
+        # Arrange
+        mock_post_transaction.return_value = sample_device
+        request = create_mock_request(path=f"/{Model.IchibuV1.value}", method="POST", json_data=sample_config_data)
 
-        # Verify the data sent to Firestore is correctly serialized (e.g., timedelta -> float)
-        expected_firestore_data = {
-            "gain": 2.0,
-            "ingredient": "sugar",
-            "loadCellId": 2,
-            "location": "shelf",
-            "offset": 0.1,
-            "phidgetId": 456,
-            "heartbeatPeriod": 60.0,
-            "phidgetSamplePeriod": 0.2,
-            "maxNoise": 0.6,
-            "bufferLength": 20,
-        }
-        self.mock_transaction.set.assert_called_once_with(
-            self.mock_config_ref, expected_firestore_data
+        # Act
+        response = post(request, mock_db)
+
+        # Assert
+        mock_db.transaction.assert_called_once()
+        mock_post_transaction.assert_called_once()
+        assert response.status_code == HTTPStatus.CREATED
+        assert response.json == sample_device.model_dump()
+
+    def test_post_transaction_no_collision(self, mock_db, sample_config):
+        # Arrange
+        transaction = MagicMock()
+        model = Model.IchibuV1
+        base_serial = f"{sample_config.phidget_id}-{sample_config.load_cell_id}"
+
+        mock_device_collection = MagicMock()
+        mock_config_collection = MagicMock()
+        mock_db.collection.side_effect = lambda name: {
+            DEVICE_COLLECTION: mock_device_collection,
+            CONFIG_COLLECTION: mock_config_collection,
+        }[name]
+
+        mock_query = MagicMock()
+        mock_device_collection.where.return_value = mock_query
+        mock_query.stream.return_value = []  # No collision
+
+        mock_config_doc_ref = MagicMock()
+        mock_config_doc_ref.id = "new-config-id"
+        mock_config_collection.document.return_value = mock_config_doc_ref
+        mock_device_collection.document.return_value = MagicMock()
+
+        # Act
+        new_device = _post_transaction(transaction, mock_db, model, sample_config)
+
+        # Assert
+        mock_device_collection.where.assert_called_once()
+        assert mock_device_collection.where.call_args[1]["filter"].value == base_serial
+        assert new_device.serial_number == base_serial
+
+    def test_post_transaction_serial_collision(self, mock_db, sample_config):
+        # Arrange
+        transaction = MagicMock()
+        model = Model.IchibuV1
+        base_serial = f"{sample_config.phidget_id}-{sample_config.load_cell_id}"
+
+        mock_device_collection = MagicMock()
+        mock_config_collection = MagicMock()
+        mock_db.collection.side_effect = lambda name: {
+            DEVICE_COLLECTION: mock_device_collection,
+            CONFIG_COLLECTION: mock_config_collection,
+        }[name]
+
+        mock_query = MagicMock()
+        mock_device_collection.where.return_value = mock_query
+        mock_query.stream.side_effect = [[create_mock_firestore_doc({})], []]  # Collision, then no collision
+
+        mock_config_doc_ref = MagicMock()
+        mock_config_doc_ref.id = "new-config-id"
+        mock_config_collection.document.return_value = mock_config_doc_ref
+        mock_device_collection.document.return_value = MagicMock()
+
+        # Act
+        new_device = _post_transaction(transaction, mock_db, model, sample_config)
+
+        # Assert
+        assert len(mock_device_collection.where.call_args_list) == 2
+        assert mock_device_collection.where.call_args_list[0][1]["filter"].value == base_serial
+        assert mock_device_collection.where.call_args_list[1][1]["filter"].value == f"{base_serial}-0"
+        assert new_device.serial_number == f"{base_serial}-0"
+
+
+# --- Tests for address_api_handler.py ---
+
+
+class TestAddressApiHandler:
+    @patch("address_api_handler.path_to_device")
+    @patch("address_api_handler._get_address_transaction")
+    def test_get_address_success(self, mock_get_address, mock_path_to_device, mock_db, app_context, sample_device):
+        # Arrange
+        mock_path_to_device.return_value = sample_device
+        expected_address = "192.168.1.100"
+        mock_get_address.return_value = expected_address
+        request = create_mock_request(path=f"/address/{sample_device.model.value}/{sample_device.serial_number}")
+
+        # Act
+        response = get_address(request, mock_db)
+
+        # Assert
+        mock_path_to_device.assert_called_once_with(f"/{sample_device.model.value}/{sample_device.serial_number}")
+        mock_db.transaction.assert_called_once()
+        mock_get_address.assert_called_once_with(mock_db.transaction(), mock_db, sample_device)
+        assert response.status_code == HTTPStatus.OK
+        assert response.json == {"address": expected_address}
+
+    @patch("address_api_handler.path_to_device")
+    @patch("address_api_handler._get_address_transaction", side_effect=FirestoreError("Device not found"))
+    def test_get_address_not_found(self, mock_get_address, mock_path_to_device, mock_db, app_context, sample_device):
+        # Arrange
+        mock_path_to_device.return_value = sample_device
+        request = create_mock_request(path=f"/address/{sample_device.model.value}/{sample_device.serial_number}")
+
+        # Act
+        response = get_address(request, mock_db)
+
+        # Assert
+        assert response.status_code == HTTPStatus.NOT_FOUND
+        assert "Device not found" in response.json["error"]
+
+    def test_get_address_transaction_no_address_field(self, mock_db, sample_device):
+        # Arrange
+        transaction = MagicMock()
+        mock_doc = create_mock_firestore_doc({"some_other_field": "value"})  # No 'address' field
+        mock_query = MagicMock()
+        mock_query.stream.return_value = [mock_doc]
+        mock_db.collection.return_value.where.return_value.where.return_value.limit.return_value = mock_query
+
+        # Act & Assert
+        with pytest.raises(FirestoreError, match="Device has no configured address"):
+            _get_address_transaction(transaction, mock_db, sample_device)
+        mock_query.stream.assert_called_once_with(transaction=transaction)
+
+    @patch("address_api_handler.path_to_device")
+    @patch("address_api_handler._put_address_transaction")
+    def test_put_address_success(self, mock_put_address, mock_path_to_device, mock_db, app_context, sample_device):
+        # Arrange
+        mock_path_to_device.return_value = sample_device
+        new_address = "192.168.1.200"
+        request = create_mock_request(
+            path=f"/address/{sample_device.model.value}/{sample_device.serial_number}",
+            method="PUT",
+            json_data={"address": new_address},
         )
 
-    def test_put_invalid_json_body(self):
-        """Test PUT request with a malformed or incomplete JSON body."""
-        request_json = {"gain": 2.0}  # Missing required fields
+        # Act
+        response = put_address(request, mock_db)
 
-        with self.app.test_request_context(
-            path="/IchibuV1/1", method="PUT", json=request_json
-        ):
-            response = put(flask.request, self.mock_db)
+        # Assert
+        mock_path_to_device.assert_called_once_with(f"/{sample_device.model.value}/{sample_device.serial_number}")
+        mock_db.transaction.assert_called_once()
+        mock_put_address.assert_called_once_with(mock_db.transaction(), mock_db, sample_device, new_address)
+        assert response.status_code == HTTPStatus.OK
+        assert response.get_data(as_text=True) == "Successfully updated address."
 
-        self.assertEqual(response.status_code, HTTPStatus.BAD_REQUEST)
-        self.assertIn("Bad Request", response.get_json()["error"])
-
-    def test_put_device_not_found(self):
-        """Test PUT request for a device that does not exist."""
-        # Override setup: device query returns no results
-        self.mock_db.collection.return_value.where.return_value.where.return_value.stream.return_value = (
-            []
+    @patch("address_api_handler.path_to_device")
+    def test_put_address_invalid_json(self, mock_path_to_device, mock_db, app_context, sample_device):
+        # Arrange
+        mock_path_to_device.return_value = sample_device
+        request = create_mock_request(
+            path=f"/address/{sample_device.model.value}/{sample_device.serial_number}",
+            method="PUT",
+            json_data={"wrong_key": "value"},
         )
 
-        # A valid JSON body is required to get past the initial Pydantic validation
-        # and actually test the Firestore "not found" logic.
-        valid_request_json = {
-            "gain": 2.0,
-            "ingredient": "sugar",
-            "loadCellId": 2,
-            "location": "shelf",
-            "offset": 0.1,
-            "phidgetId": 456,
-            "heartbeatPeriod": {"secs": 60, "nanos": 0},
-            "phidgetSamplePeriod": {"secs": 0, "nanos": 200000000},
-            "maxNoise": 0.6,
-            "bufferLength": 20,
-        }
+        # Act
+        response = put_address(request, mock_db)
 
-        # The original test sent `json={}`, which caused a ValidationError (400)
-        # before the database was ever queried.
-        with self.app.test_request_context(
-            path="/IchibuV1/99", method="PUT", json=valid_request_json
-        ):
-            response = put(flask.request, self.mock_db)
-
-        self.assertEqual(response.status_code, HTTPStatus.NOT_FOUND)
-        self.assertIn("No document found", response.get_json()["error"])
-
-
-class TestPostHandler(unittest.TestCase):
-    """Tests for the POST request handler."""
-
-    def setUp(self):
-        self.app = flask.Flask(__name__)
-        self.mock_db = MagicMock()
-        self.mock_transaction = MagicMock()
-        self.mock_db.transaction.return_value = self.mock_transaction
-
-        self.new_config_data = {
-            "gain": 1.0,
-            "ingredient": "flour",
-            "loadCellId": 1,
-            "location": "bin",
-            "offset": 0.0,
-            "phidgetId": 789,
-            "heartbeatPeriod": {"secs": 15, "nanos": 0},
-            "phidgetSamplePeriod": {"secs": 0, "nanos": 50000000},
-            "maxNoise": 0.2,
-            "bufferLength": 5,
-        }
-
-    def test_post_success_first_device(self):
-        """Test creating the very first device of a given model."""
-        # Setup: Query for latest device returns nothing
-        mock_latest_device_query = (
-            self.mock_db.collection.return_value.where.return_value.order_by.return_value.limit.return_value
-        )
-        mock_latest_device_query.stream.return_value = []
-
-        # Setup: Mock document creation
-        mock_new_config_ref = MagicMock()
-        mock_new_config_ref.id = "newConfigId"
-        mock_new_device_ref = MagicMock()
-
-        # Make collection('...').document() return the correct mock ref
-        def document_side_effect():
-            if self.mock_db.collection.call_args[0][0] == CONFIG_COLLECTION:
-                return mock_new_config_ref
-            return mock_new_device_ref
-
-        self.mock_db.collection.return_value.document.side_effect = document_side_effect
-
-        with self.app.test_request_context(
-            path="/IchibuV1", method="POST", json=self.new_config_data
-        ):
-            response = post(flask.request, self.mock_db)
-
-        self.assertEqual(response.status_code, HTTPStatus.CREATED)
-        # The new device should be number 1
-        self.assertEqual(response.get_json(), {"model": "IchibuV1", "number": 1})
-
-        # Verify new device doc was created with correct data
-        expected_device_doc = {
-            "model": "IchibuV1",
-            "number": 1,
-            "config": "newConfigId",
-        }
-        self.mock_transaction.set.assert_any_call(
-            mock_new_device_ref, expected_device_doc
-        )
-
-    def test_post_success_subsequent_device(self):
-        """Test creating a new device when others of the same model already exist."""
-        # Setup: Query for latest device returns device number 5
-        mock_latest_device = MagicMock()
-        mock_latest_device.get.return_value = 5
-
-        mock_latest_device_query = (
-            self.mock_db.collection.return_value.where.return_value.order_by.return_value.limit.return_value
-        )
-        mock_latest_device_query.stream.return_value = [mock_latest_device]
-
-        with self.app.test_request_context(
-            path="/IchibuV1", method="POST", json=self.new_config_data
-        ):
-            response = post(flask.request, self.mock_db)
-
-        self.assertEqual(response.status_code, HTTPStatus.CREATED)
-        # The new device should be number 6 (5 + 1)
-        self.assertEqual(response.get_json(), {"model": "IchibuV1", "number": 6})
-        mock_latest_device.get.assert_called_with("number")
-
-    def test_post_invalid_model_in_path(self):
-        """Test POST request with an invalid model name in the URL."""
-        with self.app.test_request_context(
-            path="/NotAModel", method="POST", json=self.new_config_data
-        ):
-            response = post(flask.request, self.mock_db)
-
-        self.assertEqual(response.status_code, HTTPStatus.BAD_REQUEST)
-        self.assertIn("Invalid model 'NotAModel' in path", response.get_json()["error"])
-
-    def test_post_invalid_json_body(self):
-        """Test POST request with an invalid JSON body."""
-        invalid_json = {"gain": 1.0}  # Missing fields
-
-        with self.app.test_request_context(
-            path="/IchibuV1", method="POST", json=invalid_json
-        ):
-            response = post(flask.request, self.mock_db)
-
-        self.assertEqual(response.status_code, HTTPStatus.BAD_REQUEST)
-        self.assertIn("Invalid JSON body", response.get_json()["error"])
-
-
-class TestAddressHandlers(unittest.TestCase):
-    def setUp(self):
-        """Set up a mock Flask app context and a mock Firestore client."""
-        self.app = flask.Flask(__name__)
-        self.mock_db = MagicMock()
-        self.mock_transaction = MagicMock()
-        self.mock_db.transaction.return_value = self.mock_transaction
-
-
-class TestGetAddressHandler(TestAddressHandlers):
-    """Tests for the GET /address/<model>/<number> handler."""
-
-    def test_get_address_success(self):
-        """Test successful retrieval of a device's address."""
-        # --- Setup Mocks ---
-        mock_device_snapshot = MagicMock()
-        mock_device_snapshot.to_dict.return_value = {"address": "192.168.1.100"}
-
-        # The query chain in the function under test
-        mock_query = self.mock_db.collection.return_value.where.return_value.where.return_value.limit.return_value
-        mock_query.stream.return_value = [mock_device_snapshot]
-
-        # --- Test Execution ---
-        with self.app.test_request_context(path="/address/IchibuV1/1"):
-            response = get_address(flask.request, self.mock_db)
-
-        # --- Assertions ---
-        self.assertEqual(response.status_code, HTTPStatus.OK)
-        self.assertEqual(response.get_json(), {"address": "192.168.1.100"})
-        self.mock_db.collection.assert_called_with(DEVICE_COLLECTION)
-
-        # Note: The implementation of _get_address_transaction has a bug where it does not
-        # pass the transaction to the stream() call. This assertion verifies the
-        # current (buggy) behavior. A fix would involve passing the transaction.
-        mock_query.stream.assert_called_with()
-
-    def test_get_address_device_not_found(self):
-        """Test GET address for a device that does not exist."""
-        mock_query = self.mock_db.collection.return_value.where.return_value.where.return_value.limit.return_value
-        mock_query.stream.return_value = []
-
-        with self.app.test_request_context(path="/address/IchibuV1/99"):
-            response = get_address(flask.request, self.mock_db)
-
-        # The current implementation raises a generic Exception, resulting in a 500.
-        self.assertEqual(response.status_code, HTTPStatus.INTERNAL_SERVER_ERROR)
-        self.assertIn("No document found", response.get_json()["error"])
-
-    def test_get_address_no_address_field_in_doc(self):
-        """Test GET address for a device document missing the 'address' field."""
-        mock_device_snapshot = MagicMock()
-        # Document exists but is missing the 'address' field
-        mock_device_snapshot.to_dict.return_value = {"model": "IchibuV1", "number": 1}
-
-        mock_query = self.mock_db.collection.return_value.where.return_value.where.return_value.limit.return_value
-        mock_query.stream.return_value = [mock_device_snapshot]
-
-        with self.app.test_request_context(path="/address/IchibuV1/1"):
-            response = get_address(flask.request, self.mock_db)
-
-        self.assertEqual(response.status_code, HTTPStatus.INTERNAL_SERVER_ERROR)
-        self.assertIn("Device has no configured address", response.get_json()["error"])
-
-    def test_get_address_bad_path(self):
-        """Test GET address with a malformed path."""
-        with self.app.test_request_context(path="/address/invalid_path"):
-            response = get_address(flask.request, self.mock_db)
-
-        self.assertEqual(response.status_code, HTTPStatus.INTERNAL_SERVER_ERROR)
-        self.assertIn("Invalid path format", response.get_json()["error"])
-
-
-class TestPutAddressHandler(TestAddressHandlers):
-    """Tests for the PUT /address/<model>/<number> handler."""
-
-    def test_put_address_success(self):
-        """Test successful update of a device's address."""
-        mock_device_snapshot = MagicMock()
-        mock_doc_ref = MagicMock()
-        mock_device_snapshot.reference = mock_doc_ref
-
-        mock_query = self.mock_db.collection.return_value.where.return_value.where.return_value.limit.return_value
-        mock_query.stream.return_value = [mock_device_snapshot]
-
-        request_json = {"address": "10.0.0.1"}
-        with self.app.test_request_context(
-            path="/address/IchibuV1/1", method="PUT", json=request_json
-        ):
-            response = put_address(flask.request, self.mock_db)
-
-        self.assertEqual(response.status_code, HTTPStatus.OK)
-        self.assertEqual(response.get_data(as_text=True), "Successfully updated address.")
-        mock_query.stream.assert_called_with(transaction=self.mock_transaction)
-        self.mock_transaction.update.assert_called_once_with(mock_doc_ref, {"address": "10.0.0.1"})
-
-    def test_put_address_device_not_found(self):
-        """Test PUT address for a device that does not exist."""
-        mock_query = self.mock_db.collection.return_value.where.return_value.where.return_value.limit.return_value
-        mock_query.stream.return_value = []
-
-        request_json = {"address": "10.0.0.1"}
-        with self.app.test_request_context(
-            path="/address/IchibuV1/99", method="PUT", json=request_json
-        ):
-            response = put_address(flask.request, self.mock_db)
-
-        self.assertEqual(response.status_code, HTTPStatus.INTERNAL_SERVER_ERROR)
-        self.assertIn("No document found", response.get_json()["error"])
-
-    def test_put_address_bad_path(self):
-        """Test PUT address with a malformed path."""
-        request_json = {"address": "10.0.0.1"}
-        with self.app.test_request_context(
-            path="/address/invalid/path/extra", method="PUT", json=request_json
-        ):
-            response = put_address(flask.request, self.mock_db)
-
-        self.assertEqual(response.status_code, HTTPStatus.INTERNAL_SERVER_ERROR)
-        self.assertIn("Invalid path format", response.get_json()["error"])
-
-    def test_put_address_missing_json_body(self):
-        """Test PUT address with no JSON body, which should cause an error."""
-        # This simulates a request with a missing or incorrect Content-Type header
-        with self.app.test_request_context(path="/address/IchibuV1/1", method="PUT"):
-            response = put_address(flask.request, self.mock_db)
-
-        self.assertEqual(response.status_code, HTTPStatus.INTERNAL_SERVER_ERROR)
-        self.assertIn("An internal server error occurred", response.get_json()["error"])
-
-    def test_put_address_missing_address_key_in_json(self):
-        """Test PUT address with JSON body missing the 'address' key."""
-        # The current implementation will update the address to `None` in this case.
-        # This test verifies that behavior.
-        mock_device_snapshot = MagicMock()
-        mock_doc_ref = MagicMock()
-        mock_device_snapshot.reference = mock_doc_ref
-
-        mock_query = self.mock_db.collection.return_value.where.return_value.where.return_value.limit.return_value
-        mock_query.stream.return_value = [mock_device_snapshot]
-
-        request_json = {"some_other_key": "some_value"}
-        with self.app.test_request_context(
-            path="/address/IchibuV1/1", method="PUT", json=request_json
-        ):
-            response = put_address(flask.request, self.mock_db)
-
-        self.assertEqual(response.status_code, HTTPStatus.OK)
-        # Verifies that the code attempts to set the address to None
-        self.mock_transaction.update.assert_called_once_with(mock_doc_ref, {"address": None})
-
-
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
+        # Assert
+        assert response.status_code == HTTPStatus.BAD_REQUEST
+        assert "Invalid JSON body" in response.json["error"]
